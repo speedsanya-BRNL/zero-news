@@ -1,6 +1,8 @@
 const PROXIES = [
   u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`
+  u => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+  u => `https://thingproxy.freeboard.io/fetch/${u}`,
+  u => `https://cors.bridged.cc/${u}`
 ];
 const G = 'https://news.google.com/rss';
 
@@ -32,20 +34,28 @@ const REGIONS = [
 ];
 const CATS = ['ОБЩИЕ','ЭКОНОМИКА','КРИМИНАЛ'];
 
+let isBuilding = false;
+
 async function fetchText(url){
   for (const p of PROXIES){
-    try{ const r = await fetch(p(url)); if(r.ok) return await r.text(); }catch(e){}
+    try{
+      const r = await fetch(p(url));
+      if(r.ok) return await r.text();
+    }catch(e){}
   }
-  throw new Error('proxy fail');
+  throw new Error('Все прокси не работают');
 }
+
 function parseRSS(xml){
   const doc = new DOMParser().parseFromString(xml,'text/xml');
-  return [...doc.querySelectorAll('item')].map(i=>({
+  const items = doc.querySelectorAll('item');
+  if(items.length === 0) return [];
+  return [...items].map(i=>({
     title:(i.querySelector('title')?.textContent||'').replace(/ - [^-]+$/,'').trim(),
     link:i.querySelector('link')?.textContent||'#',
     pub:new Date(i.querySelector('pubDate')?.textContent||0),
     src:(i.querySelector('title')?.textContent||'').split(' - ').pop().trim(),
-  })).filter(x=>x.title).sort((a,b)=>b.pub-a.pub);
+  })).filter(x=>x.title && x.title.length > 10).sort((a,b)=>b.pub-a.pub);
 }
 
 const lazyIO = new IntersectionObserver(async(entries,obs)=>{
@@ -83,14 +93,24 @@ async function buildRegion(region){
   sec.className='region'; sec.id=region.id;
   sec.innerHTML=`<h2 class="region-title">${region.name} — загрузка…</h2>`;
   const grid=document.createElement('div'); grid.className='card-grid'; sec.appendChild(grid);
+  
+  let totalLoaded = 0;
   await Promise.all(region.feeds.map(async(feed,ci)=>{
     try{
       const items=parseRSS(await fetchText(feed)).slice(0, region.counts[ci]);
       items.forEach(it=>grid.appendChild(card(it, CATS[ci])));
-    }catch(e){ console.warn(region.id, e); }
+      totalLoaded += items.length;
+    }catch(e){ 
+      console.warn(region.id, CATS[ci], e);
+      const err=document.createElement('p');
+      err.style.cssText='color:#8b0000;font-style:italic;padding:10px;';
+      err.textContent=`⚠ ${CATS[ci]}: не удалось загрузить. Попробуйте обновить.`;
+      grid.appendChild(err);
+    }
   }));
+  
   const total=region.counts.reduce((a,b)=>a+b,0);
-  sec.querySelector('.region-title').textContent=`${region.name} — ${grid.children.length}/${total}`;
+  sec.querySelector('.region-title').textContent=`${region.name} — ${totalLoaded}/${total}`;
   return sec;
 }
 
@@ -104,27 +124,39 @@ function startCountdown(){
     const remaining = Math.max(0, REFRESH_INTERVAL - (Date.now()-lastUpdate));
     const mins = Math.floor(remaining/60000);
     const secs = Math.floor((remaining%60000)/1000);
-    document.getElementById('countdown').textContent =
-      `Следующее обновление через: ${mins}м ${secs.toString().padStart(2,'0')}с`;
+    const el = document.getElementById('countdown');
+    if(el) el.textContent = `Следующее обновление через: ${mins}м ${secs.toString().padStart(2,'0')}с`;
     if(remaining===0){ buildAll(); lastUpdate=Date.now(); }
   },1000);
 }
 
 async function buildAll(){
+  if(isBuilding) return;
+  isBuilding = true;
+  
   const app=document.getElementById('app');
   app.innerHTML='<div class="loading">Собираем 300 новостей…</div>';
   const nav=document.getElementById('nav');
-  nav.innerHTML=''; app.textContent='';
+  nav.innerHTML='';
+  
   for(const r of REGIONS){
     nav.insertAdjacentHTML('beforeend',`<a href="#${r.id}">${r.name}</a>`);
     app.appendChild(await buildRegion(r));
   }
+  
   lastUpdate=Date.now();
-  document.getElementById('updated').textContent='Обновлено: '+new Date().toLocaleString('ru-RU');
+  const upd=document.getElementById('updated');
+  if(upd) upd.textContent='Обновлено: '+new Date().toLocaleString('ru-RU');
   startCountdown();
+  isBuilding = false;
 }
 
 document.getElementById('today').textContent=
   new Date().toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
 document.getElementById('refresh').onclick=buildAll;
-buildAll();
+
+// Запускаем только один раз
+if(!window._initialized){
+  window._initialized = true;
+  buildAll();
+}
